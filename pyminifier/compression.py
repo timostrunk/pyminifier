@@ -172,6 +172,7 @@ def zip_pack(filepath, options):
     # Hopefully some day we'll be able to use ZIP_LZMA too as the compression
     # format to save even more space...
     compression_format = zipfile.ZIP_DEFLATED
+    name_generator = None # So we can tell if we need to obfuscate
     cumulative_size = 0 # For tracking size reduction stats
     # Record the filesize for later comparison
     cumulative_size += os.path.getsize(filepath)
@@ -180,6 +181,7 @@ def zip_pack(filepath, options):
     # Take care of minifying our primary script first:
     source = open(filepath).read()
     primary_tokens = token_utils.listified_tokenizer(source)
+    table =[{}]
     # Preserve shebangs (don't care about encodings for this)
     shebang = analyze.get_shebang(primary_tokens)
     if not shebang:
@@ -189,29 +191,6 @@ def zip_pack(filepath, options):
         if shebang.rstrip().endswith('python'): # Make it python3 (to be safe)
             shebang = shebang.rstrip()
             shebang += '3\n' #!/usr/bin/env python3
-    if not options.nominify: # Minify as long as we don't have this option set
-        source = minification.minify(primary_tokens, options)
-    # Write out to a temporary file to add to our zip
-    temp = tempfile.NamedTemporaryFile(mode='w')
-    temp.write(source)
-    temp.flush()
-    # Need the path where the script lives for the next steps:
-    path = os.path.split(filepath)[0]
-    if not path:
-        path = os.getcwd()
-    main_py = path + '/__main__.py'
-    if os.path.exists(main_py):
-        # There's an existing __main__.py, use it
-        z.write(main_py, '__main__.py')
-        z.write(temp.name, os.path.split(filepath)[1])
-    else:
-        # No __main__.py so we rename our main script to be the __main__.py
-        # This is so it will still execute as a zip
-        z.write(filepath, '__main__.py')
-    temp.close()
-    # Now write any required modules into the zip as well
-    local_modules = analyze.enumerate_local_modules(primary_tokens, path)
-    name_generator = None # So we can tell if we need to obfuscate
     if options.obfuscate or options.obf_classes \
         or options.obf_functions or options.obf_variables \
         or options.obf_builtins or options.obf_import_methods:
@@ -229,9 +208,43 @@ def zip_pack(filepath, options):
         else:
             name_generator = obfuscate.obfuscation_machine(
                 identifier_length=identifier_length)
-        table =[{}]
+    if name_generator:
+        obfuscate.obfuscate(
+            "__main__.py",
+            primary_tokens,
+            options,
+            name_generator=name_generator,
+            table=table
+        )
+    if not options.nominify: # Minify as long as we don't have this option set
+        source = minification.minify(primary_tokens, options)
+    source = token_utils.untokenize(primary_tokens)
+    source += (
+            "# Created by pyminifier "
+            "(https://github.com/liftoff/pyminifier)\n")
+    # Write out to a temporary file to add to our zip
+    temp = tempfile.NamedTemporaryFile(mode='w')
+    temp.write(source)
+    temp.flush()
+    # Need the path where the script lives for the next steps:
+    path = os.path.split(filepath)[0]
+    if not path:
+        path = os.getcwd()
+    main_py = path + '/__main__.py'
+    if os.path.exists(main_py):
+        # There's an existing __main__.py, use it
+        z.write(main_py, '__main__.py')
+        z.write(temp.name, os.path.split(filepath)[1])
+    else:
+        # No __main__.py so we rename our main script to be the __main__.py
+        # This is so it will still execute as a zip
+        z.write(temp.name, '__main__.py')
+    temp.close()
+    # Now write any required modules into the zip as well
+    local_modules = analyze.enumerate_local_modules(primary_tokens, path)
     included_modules = []
     for module in local_modules:
+        print("Changing module",module)
         module = module.replace('.', '/')
         module = "%s.py" % module
         # Add the filesize to our total
@@ -247,9 +260,9 @@ def zip_pack(filepath, options):
                 local_modules.append(mod) # Extend the current loop, love it =)
         if not options.nominify:
             # Perform minification (this also handles obfuscation)
-            source = minification.minify(tokens, options)
+            result = minification.minify(tokens, options)
         # Have to re-tokenize for obfucation (it's quick):
-        tokens = token_utils.listified_tokenizer(source)
+        tokens = token_utils.listified_tokenizer(result)
         # Perform obfuscation if any of the related options were set
         if name_generator:
             obfuscate.obfuscate(
@@ -266,7 +279,7 @@ def zip_pack(filepath, options):
                 "(https://github.com/liftoff/pyminifier)\n")
         # Write out to a temporary file to add to our zip
         temp = tempfile.NamedTemporaryFile(mode='w')
-        temp.write(source)
+        temp.write(result)
         temp.flush()
         z.write(temp.name, module)
         temp.close()
